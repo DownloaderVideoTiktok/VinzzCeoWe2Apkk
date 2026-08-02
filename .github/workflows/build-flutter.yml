@@ -1,0 +1,87 @@
+name: Build Flutter APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobId:
+        description: 'Job ID from bot'
+        required: true
+      userId:
+        description: 'Telegram user ID'
+        required: true
+      payload:
+        description: 'JSON payload (zipAssetUrl, zipReleaseTag, appName, buildType)'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Parse payload
+        id: parse
+        run: |
+          echo '${{ inputs.payload }}' > payload.json
+          echo "zip_url=$(jq -r '.zipAssetUrl' payload.json)" >> "$GITHUB_OUTPUT"
+          echo "app_name=$(jq -r '.appName // "My App"' payload.json)" >> "$GITHUB_OUTPUT"
+          echo "build_type=$(jq -r '.buildType // "release"' payload.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Download project ZIP from release asset
+        env:
+          ZIP_URL: ${{ steps.parse.outputs.zip_url }}
+          GH_TOKEN_DL: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -L \
+            -H "Authorization: Bearer $GH_TOKEN_DL" \
+            -H "Accept: application/octet-stream" \
+            -o project.zip \
+            "$ZIP_URL"
+
+      - name: Unzip project
+        run: |
+          mkdir -p project
+          unzip -q project.zip -d project
+          # Kalau isi zip ada 1 folder pembungkus, naikkan isinya ke root project/
+          inner_count=$(find project -mindepth 1 -maxdepth 1 -type d | wc -l)
+          file_count=$(find project -mindepth 1 -maxdepth 1 -type f | wc -l)
+          if [ "$inner_count" = "1" ] && [ "$file_count" = "0" ]; then
+            inner_dir=$(find project -mindepth 1 -maxdepth 1 -type d)
+            mv "$inner_dir"/* project/ 2>/dev/null || true
+            mv "$inner_dir"/.[!.]* project/ 2>/dev/null || true
+            rmdir "$inner_dir" 2>/dev/null || true
+          fi
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Get dependencies
+        working-directory: project
+        run: flutter pub get
+
+      - name: Build APK (release)
+        if: steps.parse.outputs.build_type != 'debug'
+        working-directory: project
+        run: flutter build apk --release
+
+      - name: Build APK (debug)
+        if: steps.parse.outputs.build_type == 'debug'
+        working-directory: project
+        run: flutter build apk --debug
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.jobId }}
+          path: project/build/app/outputs/flutter-apk/*.apk
+          retention-days: 1
